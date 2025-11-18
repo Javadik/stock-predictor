@@ -34,37 +34,6 @@ class MultiScaleCNN(nn.Module):
         return torch.cat(outputs, dim=1)  # Конкатенация по каналам
 
 
-class HierarchicalCNN(nn.Module):
-    """Иерархические CNN слои для извлечения паттернов разных уровней"""
-    def __init__(self, input_size, channel_sizes=[64, 128, 256]):
-        super().__init__()
-        self.layers = nn.ModuleList()
-
-        in_channels = input_size
-        for i, out_channels in enumerate(channel_sizes):
-            # Увеличиваем размер ядра для более глубоких слоев
-            kernel_size = 3 + i * 2
-
-            self.layers.append(nn.Sequential(
-                nn.Conv1d(in_channels, out_channels,
-                         kernel_size=kernel_size, padding=kernel_size//2),
-                nn.BatchNorm1d(out_channels),
-                nn.ReLU(),
-
-                # Пулинг для уменьшения размерности
-                nn.MaxPool1d(kernel_size=2, stride=2) if i < len(channel_sizes) - 1 else nn.Identity(),
-                nn.Dropout(0.2 + i * 0.05)  # Увеличиваем dropout для глубоких слоев
-            ))
-            in_channels = out_channels
-
-    def forward(self, x):
-        feature_maps = []
-        for layer in self.layers:
-            x = layer(x)
-            feature_maps.append(x)
-        return feature_maps  # Возвращаем карты признаков с разных уровней
-
-
 class TechnicalPatternExtractor(nn.Module):
     """Извлечение технических паттернов (свечные, трендовые, волатильность)"""
     def __init__(self, num_features):
@@ -161,101 +130,11 @@ class AttentionLSTM(nn.Module):
         return attended_output, attention_weights
 
 
-class AdaptiveFeatureFusion(nn.Module):
-    """Адаптивное объединение признаков из разных CNN ветвей"""
-    def __init__(self, feature_sizes):
-        super().__init__()
-        self.feature_sizes = feature_sizes
-        total_features = sum(feature_sizes)
-
-        # Обучаемые веса для разных типов признаков
-        self.feature_weights = nn.Parameter(torch.ones(len(feature_sizes)))
-
-        # Фьюжн слои для объединения признаков
-        self.fusion_layers = nn.Sequential(
-            nn.Linear(total_features, total_features // 2),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(total_features // 2, total_features // 4),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(total_features // 4, total_features // 8)
-        )
-
-        # Нормализация для стабилизации обучения
-        self.layer_norm = nn.LayerNorm(total_features // 8)
-
-    def forward(self, features):
-        # Адаптивная нормализация весов
-        weights = F.softmax(self.feature_weights, dim=0)
-
-        # Взвешенное объединение признаков
-        weighted_features = []
-        for i, feature in enumerate(features):
-            # Глобальное среднее для приведения к размеру (batch_size, feature_size)
-            if feature.dim() == 3:  # (batch_size, seq_len, feature_size)
-                feature = torch.mean(feature, dim=1)
-            weighted_features.append(feature * weights[i])
-
-        # Конкатенация и фьюжн
-        concatenated = torch.cat(weighted_features, dim=1)
-        fused = self.fusion_layers(concatenated)
-
-        return self.layer_norm(fused)
-
-
-class CNNLSTMDirectionalLoss(nn.Module):
-    """Специализированная функция потерь для Directional Accuracy"""
-    def __init__(self, mse_weight=0.3, da_weight=0.6,
-                 attention_weight=0.05, pattern_weight=0.05):
-        super().__init__()
-        self.mse_loss = nn.MSELoss()
-        self.mse_weight = mse_weight
-        self.da_weight = da_weight
-        self.attention_weight = attention_weight
-        self.pattern_weight = pattern_weight
-
-    def forward(self, pred, target, attention_weights=None, pattern_features=None):
-        pred = pred.squeeze()
-        target = target.squeeze()
-
-        # 1. Стандартная MSE потеря
-        mse_loss = self.mse_loss(pred, target)
-
-        # 2. Направленная потеря с адаптивными весами
-        pred_direction = torch.sign(pred)
-        target_direction = torch.sign(target)
-
-        # Усиленный штраф за неправильное направление
-        directional_penalty = torch.mean(
-            torch.relu(-pred_direction * target_direction) *
-            (1 + torch.abs(target))  # Вес зависит от величины изменения
-        )
-
-        total_loss = self.mse_weight * mse_loss + self.da_weight * directional_penalty
-
-        # 3. Регуляризация внимания (для предотвращения перефокусировки)
-        if attention_weights is not None:
-            # Поощряем распределенное внимание
-            attention_entropy = -torch.mean(
-                torch.sum(attention_weights * torch.log(attention_weights + 1e-8), dim=1)
-            )
-            total_loss += self.attention_weight * attention_entropy
-
-        # 4. Регуляризация паттернов (для предотвращения переобучения на паттерны)
-        if pattern_features is not None:
-            # L2 регуляризация для паттерн признаков
-            pattern_regularization = torch.mean(torch.sum(pattern_features ** 2, dim=1))
-            total_loss += self.pattern_weight * pattern_regularization
-
-        return total_loss
-
-
-class StockCNNLSTM(nn.Module):
-    """Гибридная CNN+LSTM архитектура для предсказания акций"""
-    def __init__(self, input_size=20, seq_length=60,
-                 cnn_channels=[32, 64, 128, 256],
-                 lstm_hidden_size=256,
+class ReducedStockCNNLSTM(nn.Module):
+    """Гибридная CNN+LSTM архитектура для предсказания акций с уменьшенным количеством признаков"""
+    def __init__(self, input_size=10, seq_length=60,
+                 cnn_channels=[16, 32, 64, 128],  # Уменьшенные каналы пропорционально количеству признаков
+                 lstm_hidden_size=128,  # Уменьшенный размер LSTM
                  lstm_layers=2,
                  dropout=0.3):
         super().__init__()
@@ -267,11 +146,11 @@ class StockCNNLSTM(nn.Module):
         self.pattern_extractor = TechnicalPatternExtractor(input_size)
 
         # Расчет размерности после CNN
-        # multiscale_cnn: [32, 64, 128, 256] -> сумма = 464
-        # pattern_extractor: 64 + 64 + 64 = 192 (candlestick + trend + volatility)
-        multiscale_channels = sum(cnn_channels)  # 32+64+128+256 = 464
+        # multiscale_cnn: [16, 32, 64, 128] -> сумма = 256
+        # pattern_extractor: 64 + 64 = 192 (candlestick + trend + volatility)
+        multiscale_channels = sum(cnn_channels)  # 16+32+64+128 = 256
         pattern_channels = 64 + 64 + 64  # candlestick + trend + volatility = 192
-        cnn_output_channels = multiscale_channels + pattern_channels  # 656
+        cnn_output_channels = multiscale_channels + pattern_channels  # 448
 
         # Слой уменьшения размерности для соответствия ожидаемому размеру LSTM
         self.dimension_reducer = nn.Conv1d(cnn_output_channels, lstm_hidden_size * 2, kernel_size=1)
@@ -281,13 +160,13 @@ class StockCNNLSTM(nn.Module):
 
         # Выходной слой
         self.classifier = nn.Sequential(
-            nn.Linear(lstm_hidden_size * 2, 128),  # *2 из-за bidirectional
+            nn.Linear(lstm_hidden_size * 2, 64),  # *2 из-за bidirectional, уменьшенный размер
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(128, 64),
+            nn.Linear(64, 32),
             nn.ReLU(),
             nn.Dropout(dropout * 0.5),
-            nn.Linear(64, 1)
+            nn.Linear(32, 1)
         )
 
         self.dropout = nn.Dropout(dropout)
@@ -295,7 +174,7 @@ class StockCNNLSTM(nn.Module):
         # Для отладки
         self.seq_length = seq_length
 
-    def forward(self, x, return_attention=False):
+    def forward(self, x):
         # x shape: (batch_size, seq_length, input_size)
         batch_size, seq_len, input_size = x.size()
 
@@ -322,28 +201,21 @@ class StockCNNLSTM(nn.Module):
         # Классификация
         output = self.classifier(lstm_output)
 
-        if return_attention:
-            return output, {
-                'multi_head_attention': attention_weights,
-                'feature_attention': attention_weights,
-                'enhanced_features': lstm_output
-            }
-
         return output, attention_weights
 
 
-def create_cnn_lstm_model(input_size=20, config=None):
-    """Создание модели CNN+LSTM с заданной конфигурацией"""
+def create_reduced_cnn_lstm_model(input_size=10, config=None):
+    """Создание уменьшенной модели CNN+LSTM с заданной конфигурацией"""
     if config is None:
         # Конфигурация по умолчанию (сбалансированная модель)
         config = {
-            'cnn_channels': [32, 64, 128, 256],
-            'lstm_hidden_size': 256,
+            'cnn_channels': [16, 32, 64, 128],
+            'lstm_hidden_size': 128,
             'lstm_layers': 2,
             'dropout': 0.3
         }
 
-    return StockCNNLSTM(
+    return ReducedStockCNNLSTM(
         input_size=input_size,
         cnn_channels=config['cnn_channels'],
         lstm_hidden_size=config['lstm_hidden_size'],

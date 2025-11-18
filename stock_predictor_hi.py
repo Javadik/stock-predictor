@@ -70,6 +70,43 @@ class ImprovedStockPredictor(nn.Module):
         output = self.linear3(output)
         return output
 
+    def forward(self, x, return_attention=False):
+        # Убедимся, что x имеет правильную размерность
+        if x.dim() == 2:
+            x = x.unsqueeze(0)  # Добавляем размерность batch если она отсутствует
+
+        lstm_out, (hidden, _) = self.lstm(x)
+
+        # Многоголовое внимание
+        attended_out, multi_attention_weights = self.multi_head_attention(lstm_out, lstm_out, lstm_out)
+        lstm_out = self.layer_norm1(lstm_out + attended_out)
+
+        # Улучшенные слои репрезентации
+        enhanced_features = self.enhanced_layers(lstm_out)
+
+        # Оригинальный механизм внимания на улучшенных признаках
+        attention_scores = self.attention_weights(enhanced_features)
+        attention_weights = self.attention_softmax(attention_scores)
+        attended_lstm_out = enhanced_features * attention_weights
+        context_vector = torch.sum(attended_lstm_out, dim=1)
+
+        output = self.dropout(context_vector)
+        output = self.linear1(output)
+        output = self.relu(output)
+        output = self.dropout(output)
+        output = self.linear2(output)
+        output = self.relu(output)
+        output = self.dropout(output)
+        output = self.linear3(output)
+
+        if return_attention:
+            return output, {
+                'multi_head_attention': multi_attention_weights,
+                'feature_attention': attention_weights,
+                'enhanced_features': enhanced_features
+            }
+        return output
+
 def prepare_data(symbol='AAPL', period='5y', seq_length=60):
     data = yf.download(symbol, period=period)
 
