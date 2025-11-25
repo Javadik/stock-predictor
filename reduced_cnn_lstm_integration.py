@@ -39,79 +39,59 @@ def compute_bollinger_bands(prices, window=20):
     lower_band = sma - (std * 2)
     return upper_band, lower_band
 
-def prepare_data(symbol='AAPL', period='5y', seq_length=60):
+def prepare_data(symbol='AAPL', period='5y', seq_length=60, use_local_data=False):
     """Подготовка данных для CNN+LSTM модели"""
-    data = yf.download(symbol, period=period)
+    if use_local_data:
+        # Используем локальный файл с данными
+        data_csv = f'./EURUSD_D.csv'
+        df = pd.read_csv(
+            data_csv,
+            names=["date", "time", "open", "high", "low", "close", "volume"],
+            parse_dates=["date"],
+            usecols=["date", "open", "high", "low", "close", "volume"]
+        )
+        # Переименовываем столбцы для совместимости с остальным кодом
+        df = df.rename(columns={'high': 'High', 'open': 'Open', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'})
 
-    # Создаем фичи
-    data['Returns'] = data['High'].pct_change()
-    data['EMA_10'] = data['High'].ewm(span=10).mean()
-    data['EMA_50'] = data['High'].ewm(span=50).mean()
-    data['Volatility'] = data['Returns'].rolling(20).std()
-    data['Volume_EMA'] = data['Volume'].ewm(span=20).mean()
+        # Оставляем только рабочие дни
+        df = df[df['date'].dt.dayofweek < 5]  # 0-4 represents Monday to Friday
 
-    # Добавляем технические индикаторы
-    data['RSI'] = compute_rsi(data['High'])
-    data['MACD'] = compute_macd(data['High'])
-    bb_upper, bb_lower = compute_bollinger_bands(data['High'])
-    data['BB_Upper'] = bb_upper
-    data['BB_Lower'] = bb_lower
+        # Считаем диффы
+        df["diff_high"] = df["High"].diff()
+        df["diff_close"] = df["Close"].diff()
 
-    # Дополнительные признаки
-    data['High_Low_Pct'] = (data['High'] - data['Low']) / data['High']
-    data['Price_Change'] = (data['High'] - data['Open']) / data['Open']
-    data['Volume_Change'] = data['Volume'].pct_change()
-    data['Momentum'] = data['High'] - data['High'].shift(10)  # 10-дневный моментум
+        # Удаляем строки с NaN после diff
+        df = df.dropna()
 
-    # Средние скользящие как дополнительные фичи
-    data['SMA_20'] = data['High'].rolling(window=20).mean()
-    data['SMA_200'] = data['High'].rolling(window=200).mean()
-    data['MA_Ratio'] = data['SMA_20'] / data['SMA_200']  # Отношение краткосрочной к долгосрочной MA
+        data = df.set_index('date')
 
-    # Позиция внутри Bollinger Bands (избегаем деления на 0)
-    bb_range = data['BB_Upper'] - data['BB_Lower']
-    bb_range = bb_range.replace(0, np.nan)  # Заменяем 0 на NaN, чтобы избежать деления на 0
-    bb_position = (data['High'] - data['BB_Lower']) / bb_range
-    bb_position = bb_position.fillna(0.5)  # Заполняем NaN значением 0.5 (середина диапазона)
-    # Убедимся, что bb_position - это одномерная серия, а не DataFrame
-    if isinstance(bb_position, pd.DataFrame):
-        bb_position = bb_position.iloc[:, 0]  # Берем первый столбец
-    data['BB_Position'] = bb_position
+        # Создаем фичи на основе диффов
+        data['Diff_High'] = data["diff_high"]
+        data['Diff_Close'] = data["diff_close"]
+    else:
+        # Используем прежний источник данных
+        data = yf.download(symbol, period=period)
 
-    # НОВЫЕ признаки для улучшения DA
-    # Адаптивная волатильность
-    data['Adaptive_Volatility'] = data['Returns'].rolling(20).std() / data['Returns'].rolling(50).std()
-
-    # Сила тренда
-    data['Trend_Strength'] = (data['High'] - data['Low']).rolling(10).mean() / data['High'].rolling(50).mean()
-
-    # Относительная сила цены
-    data['Price_Strength'] = (data['High'] - data['Low'].rolling(20).min()) / (data['High'].rolling(20).max() - data['Low'].rolling(20).min())
-
-    # Объемно-взвешенная цена
-    vwap = (data['High'] * data['Volume']).rolling(20).sum() / data['Volume'].rolling(20).sum()
-    data['VWAP'] = vwap
-    data['Price_to_VWAP'] = data['High'] / vwap
-
-    # Моментум волатильности
-    data['Volatility_Momentum'] = data['Volatility'] - data['Volatility'].shift(5)
+        # Создаем фичи на основе диффов
+        data['Diff_High'] = data['High'].diff().dropna()
+        data['Diff_Close'] = data['Close'].diff().dropna()
 
     # Удаляем строки с NaN значениями только после всех вычислений
     data = data.dropna()
 
-    features = ['High', 'Volume', 'Returns', 'EMA_10', 'EMA_50',
-                'Volatility', 'Volume_EMA', 'RSI', 'MACD', 'BB_Position',
-                'High_Low_Pct', 'Price_Change', 'Volume_Change', 'Momentum', 'MA_Ratio',
-                'Adaptive_Volatility', 'Trend_Strength', 'Price_Strength', 'Price_to_VWAP', 'Volatility_Momentum']
+    # Проверяем, что данные отсортированы по дате
+    data = data.sort_index()
+
+    features = ['Diff_High', 'Diff_Close']
 
     # Разделяем данные
     total_size = len(data)
-    train_size = int(total_size * 0.7)
-    val_size = int(total_size * 0.15)
+    train_size = int(total_size * 0.65)  # Уменьшили до 65%
+    val_size = int(total_size * 0.15)    # Оставили 15% для валидации
 
     train_data = data.iloc[:train_size]
     val_data = data.iloc[train_size:train_size+val_size]
-    test_data = data.iloc[train_size+val_size:]
+    test_data = data.iloc[train_size+val_size:]  # Оставшиеся 20% для теста
 
     # Масштабируем
     scaler = StandardScaler()
@@ -400,7 +380,7 @@ def run_reduced_cnn_lstm_experiment():
 
     # Загружаем данные
     print("Загрузка данных...")
-    data_tuple, original_features = prepare_data('AAPL', period='5y')
+    data_tuple, original_features = prepare_data('AAPL', period='5y', use_local_data=True)
 
     (X_train, X_val, X_test, y_train, y_val, y_test,
      dates_train, dates_val, dates_test, scaler, data,
@@ -412,10 +392,20 @@ def run_reduced_cnn_lstm_experiment():
     print(f"  Тестовые: {X_test.shape} ({len(dates_test)} дат)")
     print(f" Период данных: {data.index[0].strftime('%Y-%m-%d')} - {data.index[-1].strftime('%Y-%m-%d')}")
 
-    # Создаем полную CNN+LSTM модель для анализа важности признаков
+    # Выводим начальную дату в данных
+    print(f"Первая дата в файле: 2017.08.14")
+    print(f"Первая дата в обработанных данных: {data.index[0].strftime('%Y-%m-%d')}")
+    print(f"Дата начала периода обучения: {data.index[0].strftime('%Y-%m-%d')}")
+    print(f"Дата окончания периода обучения: {data.index[int(len(data) * 0.65) - 1].strftime('%Y-%m-%d')}")
+    print(f"Дата начала периода валидации: {data.index[int(len(data) * 0.65)].strftime('%Y-%m-%d')}")
+    print(f"Дата окончания периода валидации: {data.index[int(len(data) * 0.65) + int(len(data) * 0.15) - 1].strftime('%Y-%m-%d')}")
+    print(f"Дата начала периода тестирования: {data.index[int(len(data) * 0.65) + int(len(data) * 0.15)].strftime('%Y-%m-%d')}")
+    print(f"Дата окончания периода тестирования: {data.index[-1].strftime('%Y-%m-%d')}")
+
+   # Создаем полную CNN+LSTM модель для анализа важности признаков
     print("\nСоздание полной модели для анализа важности признаков...")
     full_model = StockCNNLSTM(
-        input_size=20,  # Количество признаков
+        input_size=2,  # Количество признаков
         seq_length=60,
         cnn_channels=[32, 64, 128, 256],
         lstm_hidden_size=256,
