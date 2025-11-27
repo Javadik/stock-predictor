@@ -8,7 +8,8 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 from reduced_cnn_lstm_model import ReducedStockCNNLSTM
-from cnn_lstm_model import StockCNNLSTM, CNNLSTMDirectionalLoss
+from cnn_lstm_model import StockCNNLSTM
+from balanced_cnn_lstm_model import WeightedDirectionalLoss
 from feature_selector import FeatureSelector
 from feature_importance_analyzer import ComprehensiveFeatureAnalyzer, directional_accuracy_metric
 import random
@@ -284,8 +285,24 @@ def train_reduced_cnn_lstm_model(model, X_train, y_train, X_val, y_val, epochs=1
     optimizer = optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.6, min_lr=1e-6)
 
-    # Используем специализированную функцию потерь для DA
-    criterion = CNNLSTMDirectionalLoss(mse_weight=0.3, da_weight=0.6, attention_weight=0.05, pattern_weight=0.05)
+    # Используем балансированную функцию потерь для DA
+    # Определяем соотношение рост/падение в обучающих данных
+    y_train_cpu = y_train.cpu().numpy()
+    up_count = np.sum(y_train_cpu > 0.001)
+    down_count = np.sum(y_train_cpu < -0.001)
+
+    if up_count > 0 and down_count > 0:
+        # Используем соотношение для балансировки
+        pos_weight = down_count / up_count  # Увеличиваем вес для роста, если он встречается реже
+        neg_weight = up_count / down_count  # Увеличиваем вес для падения, если оно встречается реже
+    else:
+        # Если нет примеров одного из направлений, используем равные веса
+        pos_weight = 1.0
+        neg_weight = 1.0
+
+    print(f"Балансировка весов: pos_weight={pos_weight:.3f}, neg_weight={neg_weight:.3f}")
+
+    criterion = WeightedDirectionalLoss(pos_weight=pos_weight, neg_weight=neg_weight, mse_weight=0.3, da_weight=0.6)
 
     train_losses, val_losses, val_das = [], [], []
     best_val_loss = float('inf')
@@ -470,9 +487,9 @@ def plot_results_with_changes(model, X_test, y_test, dates_test, base_prices_tes
     plt.xticks(rotation=45)
 
     plt.tight_layout()
-    plt.savefig('cnn_lstm/reduced_cnn_lstm_stock_predictions.png', dpi=300, bbox_inches='tight')
+    plt.savefig('cnn_lstm/rebalanced_cnn_lstm_stock_predictions.png', dpi=300, bbox_inches='tight')
     plt.show()  # Показываем график в Colab
-    print("График сохранен как 'cnn_lstm/reduced_cnn_lstm_stock_predictions.png'")
+    print("График сохранен как 'cnn_lstm/rebalanced_cnn_lstm_stock_predictions.png'")
 
     # Метрики
     mse = np.mean(errors ** 2)
@@ -503,8 +520,8 @@ def plot_results_with_changes(model, X_test, y_test, dates_test, base_prices_tes
 
     return real_prices, pred_prices
 
-def run_reduced_cnn_lstm_experiment():
-    """Запуск эксперимента с сокращенной CNN+LSTM моделью"""
+def run_rebalanced_cnn_lstm_experiment():
+    """Запуск эксперимента с сокращенной CNN+LSTM моделью с балансировкой"""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Устройство: {device}")
 
@@ -547,6 +564,7 @@ def run_reduced_cnn_lstm_experiment():
     print("Обучение полной модели для анализа важности...")
     # Используем оптимизатор и функцию потерь
     optimizer = optim.AdamW(full_model.parameters(), lr=0.0005, weight_decay=1e-4)
+    from cnn_lstm_model import CNNLSTMDirectionalLoss
     criterion = CNNLSTMDirectionalLoss(mse_weight=0.3, da_weight=0.6, attention_weight=0.05, pattern_weight=0.05)
 
     # Обучаем модель на нескольких эпохах
@@ -643,4 +661,4 @@ def run_reduced_cnn_lstm_experiment():
 
 # Запуск эксперимента
 if __name__ == "__main__":
-    model, da = run_reduced_cnn_lstm_experiment()
+    model, da = run_rebalanced_cnn_lstm_experiment()

@@ -8,7 +8,8 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 from reduced_cnn_lstm_model import ReducedStockCNNLSTM
-from cnn_lstm_model import StockCNNLSTM, CNNLSTMDirectionalLoss
+from cnn_lstm_model import StockCNNLSTM
+from balanced_cnn_lstm_model import WeightedDirectionalLoss
 from feature_selector import FeatureSelector
 from feature_importance_analyzer import ComprehensiveFeatureAnalyzer, directional_accuracy_metric
 import random
@@ -273,8 +274,8 @@ def prepare_reduced_data_with_selected_features(data_tuple, selected_features):
             dates_train, dates_val, dates_test, scaler, data,
             base_train, base_val, base_test), selected_feature_names
 
-def train_reduced_cnn_lstm_model(model, X_train, y_train, X_val, y_val, epochs=150, patience=30):
-    """Обучение сокращенной CNN+LSTM модели с ранней остановкой"""
+def train_noisy_reduced_cnn_lstm_model(model, X_train, y_train, X_val, y_val, epochs=150, patience=30):
+    """Обучение сокращенной CNN+LSTM модели с добавлением шума для улучшения баланса"""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     X_train, y_train = X_train.to(device), y_train.to(device)
@@ -284,7 +285,8 @@ def train_reduced_cnn_lstm_model(model, X_train, y_train, X_val, y_val, epochs=1
     optimizer = optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.6, min_lr=1e-6)
 
-    # Используем специализированную функцию потерь для DA
+    # Используем стандартную функцию потерь
+    from cnn_lstm_model import CNNLSTMDirectionalLoss
     criterion = CNNLSTMDirectionalLoss(mse_weight=0.3, da_weight=0.6, attention_weight=0.05, pattern_weight=0.05)
 
     train_losses, val_losses, val_das = [], [], []
@@ -293,14 +295,19 @@ def train_reduced_cnn_lstm_model(model, X_train, y_train, X_val, y_val, epochs=1
     patience_counter = 0
     best_model_state = None
 
-    print("\nНачинаем обучение сокращенной CNN+LSTM с ранней остановкой по DA...")
+    print("\nНачинаем обучение сокращенной CNN+LSTM с добавлением шума для улучшения баланса...")
     for epoch in range(epochs):
         model.train()
         optimizer.zero_grad()
 
         # Используем градиентную проверку
         outputs, attention_weights = model(X_train)
-        loss = criterion(outputs.squeeze(), y_train, attention_weights)
+
+        # Добавляем шум к выходу для улучшения обобщения и баланса
+        noise_scale = 0.01 * (epoch / epochs)  # Постепенно увеличиваем шум
+        noisy_outputs = outputs + torch.randn_like(outputs) * noise_scale
+
+        loss = criterion(noisy_outputs.squeeze(), y_train, attention_weights)
         loss.backward()
 
         # Обрезка градиентов для стабильности
@@ -310,6 +317,10 @@ def train_reduced_cnn_lstm_model(model, X_train, y_train, X_val, y_val, epochs=1
         model.eval()
         with torch.no_grad():
             val_outputs, val_attention_weights = model(X_val)
+
+            # Добавляем шум к валидационным выходам для более стабильной оценки
+            val_outputs = val_outputs + torch.randn_like(val_outputs) * 0.005
+
             val_loss = criterion(val_outputs.squeeze(), y_val, val_attention_weights)
 
             # Вычисляем Directional Accuracy
@@ -470,9 +481,9 @@ def plot_results_with_changes(model, X_test, y_test, dates_test, base_prices_tes
     plt.xticks(rotation=45)
 
     plt.tight_layout()
-    plt.savefig('cnn_lstm/reduced_cnn_lstm_stock_predictions.png', dpi=300, bbox_inches='tight')
+    plt.savefig('cnn_lstm/noise_balanced_cnn_lstm_stock_predictions.png', dpi=300, bbox_inches='tight')
     plt.show()  # Показываем график в Colab
-    print("График сохранен как 'cnn_lstm/reduced_cnn_lstm_stock_predictions.png'")
+    print("График сохранен как 'cnn_lstm/noise_balanced_cnn_lstm_stock_predictions.png'")
 
     # Метрики
     mse = np.mean(errors ** 2)
@@ -503,8 +514,8 @@ def plot_results_with_changes(model, X_test, y_test, dates_test, base_prices_tes
 
     return real_prices, pred_prices
 
-def run_reduced_cnn_lstm_experiment():
-    """Запуск эксперимента с сокращенной CNN+LSTM моделью"""
+def run_noise_balanced_cnn_lstm_experiment():
+    """Запуск эксперимента с сокращенной CNN+LSTM моделью с добавлением шума"""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Устройство: {device}")
 
@@ -547,6 +558,7 @@ def run_reduced_cnn_lstm_experiment():
     print("Обучение полной модели для анализа важности...")
     # Используем оптимизатор и функцию потерь
     optimizer = optim.AdamW(full_model.parameters(), lr=0.0005, weight_decay=1e-4)
+    from cnn_lstm_model import CNNLSTMDirectionalLoss
     criterion = CNNLSTMDirectionalLoss(mse_weight=0.3, da_weight=0.6, attention_weight=0.05, pattern_weight=0.05)
 
     # Обучаем модель на нескольких эпохах
@@ -620,8 +632,8 @@ def run_reduced_cnn_lstm_experiment():
     print(f"\nСокращенная CNN+LSTM модель создана: {sum(p.numel() for p in model.parameters()):,} параметров")
     print(f"Количество признаков: {len(selected_indices)} (было {len(original_features)})")
 
-    # Обучаем модель
-    train_losses, val_losses, val_das = train_reduced_cnn_lstm_model(
+    # Обучаем модель с добавлением шума
+    train_losses, val_losses, val_das = train_noisy_reduced_cnn_lstm_model(
         model, X_train_reduced, y_train, X_val_reduced, y_val, epochs=50, patience=15
     )
 
@@ -643,4 +655,4 @@ def run_reduced_cnn_lstm_experiment():
 
 # Запуск эксперимента
 if __name__ == "__main__":
-    model, da = run_reduced_cnn_lstm_experiment()
+    model, da = run_noise_balanced_cnn_lstm_experiment()
